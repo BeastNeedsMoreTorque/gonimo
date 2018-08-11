@@ -24,8 +24,13 @@ import qualified GHCJS.DOM.Window                  as Window
 import qualified Language.Javascript.JSaddle.Monad as JS
 
 import qualified Gonimo.Client.Baby.Socket         as Socket
+import qualified Gonimo.Client.Host                as Host
+import           Gonimo.Client.Model               (IsConfig)
+import qualified Gonimo.Client.Router              as Router
+import qualified Gonimo.Client.Server              as Server
 import qualified Gonimo.Client.Storage             as GStorage
 import qualified Gonimo.Client.Storage.Keys        as GStorage
+import qualified Gonimo.Client.Subscriber          as Subscriber
 import           Gonimo.Client.Util                (getVolumeInfo, oyd)
 import           Gonimo.DOM.Navigator.MediaDevices
 import qualified Gonimo.SocketAPI                  as API
@@ -69,7 +74,9 @@ data UI t
        , _uiRequest         :: Event t [API.ServerRequest]
        }
 
-type HasModel model t = Socket.HasModel model t
+type HasModel model = (Socket.HasModel model, Router.HasRouter model)
+
+type HasModelConfig c t = (IsConfig c t, Server.HasConfig c, Router.HasConfig c, Subscriber.HasConfig c, Host.HasConfig c)
 
 uiSwitchPromptly :: forall t m. (MonadHold t m, Reflex t, MonadFix m) => Event t (UI t) -> m (UI t)
 uiSwitchPromptly ev
@@ -93,7 +100,7 @@ uiSwitchPromptlyDyn ev
        ( switchPromptlyDyn (_uiSetBabyName <$> ev) )
        ( switchPromptlyDyn (_uiRequest <$> ev) )
 
-baby :: forall model m t. (HasModel model t, GonimoM model t m)
+baby :: forall model m t. (HasModel model, GonimoM model t m)
         => Config t -> m (Baby t)
 baby config = mdo
   createStreamLabels <- getInitialMediaStream -- IMPORTANT: This has to be before retrieving camera devices!

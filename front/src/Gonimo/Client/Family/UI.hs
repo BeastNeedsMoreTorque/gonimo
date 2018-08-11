@@ -26,7 +26,7 @@ import           Gonimo.SocketAPI.Types            (FamilyId)
 import qualified Gonimo.SocketAPI.Types            as API
 import qualified Gonimo.Types                      as Gonimo
 
-type HasModel model t = Invite.HasModel model t
+type HasModel model = Invite.HasModel model
 
 uiStart :: forall model m t. GonimoM model t m => m (UI t)
 uiStart =
@@ -55,7 +55,7 @@ uiStart =
         $ elAttr' "div" ( "class" =: "input-btn plus next-action"
                        <> "title" =: "Create a family to get started."
                        <> "type"  =: "button"
-                       <> "role"  =: "button"
+                       <> "route"  =: "button"
                         ) blank
 
       pure $ leftmost [ plusClicked, inputFieldClicked, headingClicked ]
@@ -65,7 +65,7 @@ uiStart =
             , _uiCreateFamily = userWantsFamily
             , _uiLeaveFamily  = never
             , _uiSetName      = never
-            , _uiRoleSelected = never
+            , _uiRouteSelected = never
             , _uiRequest      = never
             , _uiSelectLang   = langSelected
             }
@@ -77,8 +77,8 @@ privacyPolicy = do
     elClass "footer" "container-fluid" $
       elDynAttr "a" (privacyLinkAttrs <$> currentLocale) $
         trText Privacy_Policy
-ui :: forall model m t. (HasModel model t, GonimoM model t m)
-  => App.Model t -> App.Loaded t -> Bool -> m (UI t)
+ui :: forall model m t. (HasModel model, GonimoM model t m)
+  => App.Model t -> App.Loaded t -> Behavior t Bool -> m (UI t)
 ui appConfig loaded familyGotCreated = do
   (newFamilyResult, newFamilyReqs) <-
     createFamily appConfig loaded familyGotCreated
@@ -117,7 +117,7 @@ ui appConfig loaded familyGotCreated = do
         dynInvite <- widgetHold (pure def) $ const inviteUI <$> firstCreation
         pure $ Invite.inviteSwitchPromptlyDyn dynInvite
 
-    roleSelected <- roleSelector
+    routeSelected <- roleSelector
     privacyPolicy
     inviteRequested <- elClass "div" "footer" $
           makeClickable . elAttr' "div" (addBtnAttrs "device-add") $ trText Add_Device
@@ -130,7 +130,7 @@ ui appConfig loaded familyGotCreated = do
               , _uiSetName      = leftmost [ nameChanged
                                            , push (\r -> pure $ r^?_CreateFamilySetName) newFamilyResult
                                            ]
-              , _uiRoleSelected = roleSelected
+              , _uiRouteSelected = routeSelected
               , _uiRequest      = newFamilyReqs <> invite^.Invite.request
               , _uiSelectLang   = langSelected
               }
@@ -203,7 +203,7 @@ renderFamilySelector _ family' selected' = do
           $ (Gonimo.familyNameName . API.familyName <$> family') <> ffor selected' (\selected -> if selected then " ✔" else "")
 
 
-createFamily :: forall model m t. (HasModel model t, GonimoM model t m) => App.Model t -> App.Loaded t -> Bool
+createFamily :: forall model m t. (HasModel model, GonimoM model t m) => App.Model t -> App.Loaded t -> Behavior t Bool
   -> m (Event t CreateFamilyResult, Event t [API.ServerRequest])
 createFamily appConfig loaded familyGotCreated = mdo
   let response' = appConfig^.onResponse
@@ -214,25 +214,28 @@ createFamily appConfig loaded familyGotCreated = mdo
                                 API.ResCreatedFamily fid -> pure $ Just fid
                                 _                        -> pure Nothing
                            ) response'
-  mFamilyId' :: Dynamic t (Maybe FamilyId) <- holdDyn Nothing $ leftmost [ Just <$> familyCreated
-                                                                         , const Nothing <$> gotValidFamilyId'
+  mFamilyId' :: Dynamic t (Maybe FamilyId) <- holdDyn Nothing $ leftmost [ const Nothing <$> gotValidFamilyId'
+                                                                         , Just <$> familyCreated
                                                                          ]
+
+  -- This is really really ugly and should get replaced by something proper soon!
 
   let gotValidFamilyId' = leftmost [ push (\fid -> do
                                            cFamilies <- sample . current $ loaded^.App.families
                                            pure $ cFamilies ^. at fid
                                           ) familyCreated
-                                   , push (\cFamilies -> do
-                                           mFid <- sample $ current mFamilyId'
-                                           pure $ do
-                                             fid <- mFid
-                                             cFamilies ^. at fid
+                                   , push (\cFamilies -> do -- OMG
+                                            mFid <- sample $ current mFamilyId'
+                                            pure $ do
+                                              fid <- mFid
+                                              cFamilies ^. at fid
                                           ) (updated (loaded^.App.families))
-                                     ]
+                                   ]
   let uiTrue = elClass "div" "fullScreenOverlay" $ createFamily' appConfig loaded
   let uiFalse = pure (never, never)
 
-  let startUI = if familyGotCreated then uiTrue else uiFalse
+  familyGotCreated' <- sample familyGotCreated
+  let startUI = if familyGotCreated' then uiTrue else uiFalse
 
   let uiEv = leftmost [ const uiTrue <$> gotValidFamilyId'
                       , const uiFalse
@@ -249,7 +252,7 @@ createFamily appConfig loaded familyGotCreated = mdo
   pure (createFamilyEv, reqs)
 
 -- Dialog to configure family when a new one get's created:
-createFamily' :: forall model m t. (HasModel model t, GonimoM model t m) => App.Model t -> App.Loaded t
+createFamily' :: forall model m t. (HasModel model, GonimoM model t m) => App.Model t -> App.Loaded t
   -> m (Event t CreateFamilyResult, Event t [API.ServerRequest])
 createFamily' appConfig loaded = mdo
   let showNameEdit = const "isFamilyNameEdit" <$> invite^.Invite.uiGoBack

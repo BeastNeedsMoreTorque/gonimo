@@ -6,17 +6,15 @@ module Gonimo.Client.Invite.Internal where
 
 import           Control.Lens
 import           Control.Monad
-import           Control.Monad.IO.Class      (liftIO)
+
 import           Control.Monad.Fix           (MonadFix)
 import qualified Data.Aeson                  as Aeson
 import qualified Data.ByteString.Lazy        as BL
 import           Data.Default                (Default (..))
 import           Data.Monoid
 import           Data.Text                   (Text)
-import qualified Data.Text.IO                as T
 import qualified Data.Text.Encoding          as T
 import           Language.Javascript.JSaddle
-import           Language.Javascript.JSaddle.Value
 import           Network.HTTP.Types          (urlEncode)
 import           Reflex.Dom.Core
 
@@ -51,9 +49,9 @@ data InvitationSent
   | SentShare
 
 
-type HasModel model t = Env.HasEnvironment (model t)
+type HasModel model = Env.HasEnvironment model
 
-invite :: forall model t m. (MonadHold t m, MonadFix m, Reflex t, HasModel model t)
+invite :: forall model t m. (MonadHold t m, MonadFix m, Reflex t, HasModel model)
   => model t -> Config t -> m (Invite t)
 invite model config = mdo
   let
@@ -82,7 +80,7 @@ invite model config = mdo
               , _uiDone = never
               }
 
-getBaseLink :: HasModel model t => model t -> Text
+getBaseLink :: HasModel model => model t -> Text
 getBaseLink model = model ^. Env.httpProtocol <> model ^. Env.frontendHost <> model ^. Env.frontendPath
 
 makeInvitationLink :: Text -> API.Invitation -> Text
@@ -155,7 +153,7 @@ shareLink = do
   nav    <- liftJSM $ jsg ("navigator" :: Text)
   win    <- liftJSM $ jsg ("window"    :: Text)
   mNativeShare      <- liftJSM $ maybeNullOrUndefined =<< nav ! ("share"        :: Text)
-  mAndroidShare     <- liftJSM $ maybeNullOrUndefined =<< win ! ("androidShare" :: Text)
+  mAndroidShare     <- liftJSM $ maybeNullOrUndefined =<< win ! ("nativeHost" :: Text)
   case (mNativeShare, mAndroidShare) of
     (Just _share, _) ->
       let shareFunc linkUrl = void $ liftJSM $ do

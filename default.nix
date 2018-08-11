@@ -8,8 +8,8 @@ let
                    then "app.gonimo.com"
                    else "app.alpha.gonimo.com";
 
-  androidVersionCode = "5";
-  androidVersionName = "1.0.1.1";
+  androidVersionCode = "11";
+  androidVersionName = "1.0.2.2";
 
   androidIsRelease = builtins.pathExists ./release-key.nix;
 in
@@ -41,7 +41,7 @@ in
   in
   {
     executableName = "gonimo-front-android";
-    applicationId = if androidIsRelease then "com.gonimo.baby" else "org.gonimo.gonimo";
+    applicationId = "com.gonimo.baby";
     version = { code = androidVersionCode;
                 name = androidVersionName;
               };
@@ -56,8 +56,10 @@ in
       <intent-filter>
           <action android:name="android.intent.action.VIEW"/>
           <category android:name="android.intent.category.DEFAULT"/>
+          <category android:name="android.intent.category.BROWSABLE" />
           <data android:scheme="https" />
           <data android:host="${frontendServer}" />
+          <data android:pathPattern="/.*" />
       </intent-filter>
     '';
     permissions = ''

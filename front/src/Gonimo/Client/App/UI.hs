@@ -5,17 +5,16 @@
 module Gonimo.Client.App.UI where
 
 import           Control.Lens
-import qualified Data.Set                       as Set
 import qualified GHCJS.DOM                      as DOM
 import qualified GHCJS.DOM.Window               as Window
 import qualified Language.Javascript.JSaddle    as JS
 import           Reflex.Dom.Core
+import           Reflex.Network
 
 import qualified Gonimo.Client.AcceptInvitation as AcceptInvitation
-import           Gonimo.Client.App.Internal
 import           Gonimo.Client.App.Types
 import           Gonimo.Client.App.UI.I18N
-import qualified Gonimo.Client.Auth.Impl             as Auth
+import qualified Gonimo.Client.Auth.Impl        as Auth
 import qualified Gonimo.Client.Baby             as Baby
 import qualified Gonimo.Client.DeviceList       as DeviceList
 import qualified Gonimo.Client.Family           as Family
@@ -24,15 +23,20 @@ import qualified Gonimo.Client.Parent           as Parent
 import           Gonimo.Client.Prelude
 import           Gonimo.Client.Reflex
 import           Gonimo.Client.Reflex.Dom
-import           Gonimo.Client.Server           hiding (Config, config, Model, HasModel)
-import qualified Gonimo.Client.Subscriber.Impl       as Subscriber
+import           Gonimo.Client.Router           (Route (..), onGoBack, onSetRoute)
+import qualified Gonimo.Client.Router           as Router
+import           Gonimo.Client.Server           hiding (Config, HasModel, Model,
+                                                 config)
+import qualified Gonimo.Client.Server           as Server
+import           Gonimo.Client.Settings         (HasConfig (onSelectLocale),
+                                                 HasSettings, Settings)
 import qualified Gonimo.Client.Storage          as GStorage
 import qualified Gonimo.Client.Storage.Keys     as GStorage
+import qualified Gonimo.Client.Subscriber.Impl  as Subscriber
 import           Gonimo.Client.Util             (getBrowserProperty,
                                                  getBrowserVersion)
 import qualified Gonimo.SocketAPI               as API
-import           Gonimo.Client.Settings       (Settings, HasSettings, HasConfig(onSelectLocale))
-
+import           Gonimo.Client.ConfirmationButton (addConfirmation', _Yes, _No)
 
 ui :: forall m t. GonimoM Model t m => m (ModelConfig t)
 ui = mdo
@@ -46,11 +50,9 @@ ui = mdo
                                       & Family.configLeaveFamily .~ familyUI^.Family.uiLeaveFamily
                                       & Family.configSetName .~ familyUI^.Family.uiSetName
 
-  -- navEv <- navBar family
-  -- let navCreateFamily = push (pure . (^?_Left)) navEv
-  -- let navSelectFamily = push (pure . (^?_Right)) navEv
-
   msgBox <- MessageBox.ui $ MessageBox.fromApp model
+
+  leaveConf <- askLeaveConfirmation
 
   let msgSwitchFamily = push (\actions -> case actions of
                                 [MessageBox.SelectFamily fid] -> pure $ Just fid
@@ -58,39 +60,71 @@ ui = mdo
                              ) (msgBox ^. MessageBox.action)
 
   accept <- AcceptInvitation.ui model
-  (app, familyUI) <- runLoaded model family
+  (loadedConf, familyUI) <- runLoaded model family
 
-  let oldServer = mempty & onRequest .~ ( app ^. request
-                                          <> family ^. Family.request
-                                        )
-  let oldSubscriber = mempty & Subscriber.subscriptions .~ (family ^. Family.subscriptions <> app ^. subscriptions)
-  let oldConfig = mempty
-                  & serverConfig .~ oldServer
-                  & subscriberConfig .~ oldSubscriber
-                  & settingsConfig . onSelectLocale .~ leftmost [ app^.selectLang
-                                                                , familyUI^.Family.uiSelectLang
-                                                                ]
-  pure $ oldConfig <> accept
+  let withFamConf = loadedConf
+                    & Server.onRequest %~ (family ^. Family.request <>)
+                    & Subscriber.subscriptions %~ (family ^. Family.subscriptions <>)
+                    & settingsConfig . onSelectLocale %~ (familyUI ^. Family.uiSelectLang <>)
+  pure $ withFamConf <> accept <> leaveConf
+
+-- | Show confirmation dialog on history back navigation.
+--
+--   If confirmed, another history back event gets fired - finally leaving the app.
+--   If not confirmed, push another `RouteHome` on the stack so we can ask again
+--   for confirmation next time.
+
+--   TODO: This is copied from Parent.UI and adapted. We should provide a proper abstraction!
+askLeaveConfirmation :: forall m t. (GonimoM Model t m) => m (ModelConfig t)
+askLeaveConfirmation = do
+    (onAddRoute, triggerAddRoute) <- newTriggerEvent
+    -- Add another page to the history stack, so we can ask for confirmation.
+    liftIO $ triggerAddRoute RouteHome
+
+    route' <- view Router.route
+    onWantsLeave <- everySecond -- Ignore building up events (onSetRoute below) ..
+      $ push -- About to leave
+          (\newRoute -> do
+              currentRoute <- sample $ current route'
+              if currentRoute == RouteHome && newRoute == RouteHome
+                then pure $ Just ()
+                else pure $ Nothing
+          )
+          (updated route')
+    confirmed <- addConfirmation' leaveConfirmation onWantsLeave
+
+    let
+      onLeaveReq = fmapMaybe (preview _Yes) confirmed
+      onStay     = fmapMaybe (fmap (const RouteHome) . preview _No) confirmed
+
+    pure $ mempty & onSetRoute .~ leftmost [ onStay, onAddRoute ]
+                  & onGoBack   .~ onLeaveReq
+
+-- | Ask leave confirmation text for askLeaveConfirmation.
+leaveConfirmation :: forall model m t. GonimoM model t m => m ()
+leaveConfirmation = do
+    el "h3" $ trText Really_stop_gonimo
+    el "p"  $ trText Really_leave_the_app
 
 runLoaded :: forall model m t. (HasModel model t, GonimoM model t m)
-      => Model t -> Family.Family t -> m (App t, Family.UI t)
+      => Model t -> Family.Family t -> m (ModelConfig t, Family.UI t)
 runLoaded model family = do
-  let mkFuncPair fa fb = (,) <$> fa <*> fb
   evReady <- waitForJust
-             $ zipDynWith mkFuncPair (model^.Auth.authData) (family^.Family.families)
-  familyGotCreated <- hold False $ push (\res ->
-                                            case res of
-                                              API.ResCreatedFamily _ -> pure $ Just True
-                                              _ -> pure Nothing
-                                        ) (model^.onResponse)
+             $ zipDynWith (liftM2 (,)) (model^.Auth.authData) (family^.Family.families)
+  familyGotCreated <- hold False $ leftmost [ push (\res ->
+                                                       case res of
+                                                         API.ResCreatedFamily _ -> pure $ Just True
+                                                         _ -> pure Nothing
+                                                   ) (model^.onResponse)
+                                            , False <$ ffilter isNothing (updated (family ^. Family.selectedFamily))
+                                            ]
 
   let onReady dynAuthFamilies =
         fromMaybeDyn
           (do
               Auth.connectionLossScreen model
               startUI <- Family.uiStart
-              let subs = constDyn Set.empty
-              pure (App subs never never, startUI)
+              pure (mempty, startUI)
           )
           (\selected -> do
               let loaded = Loaded (fst <$> dynAuthFamilies) (snd <$> dynAuthFamilies) selected
@@ -101,56 +135,68 @@ runLoaded model family = do
   let notReady' = do
         elClass "div" "container" $ trText Loading_stay_tight
         pure never
-  dynEvEv <- widgetHold notReady' (onReady <$> evReady)
 
-  let evEv = switchPromptlyDyn dynEvEv -- Flatten Dynamic Event Event
-  (,) <$> appSwitchPromptly (fst <$> evEv)
+  readyDyn <- holdDyn notReady' $ onReady <$> evReady
+  evEv <- switchHold never =<< networkView readyDyn
+
+  (,) <$> flatten (fst <$> evEv)
       <*> Family.uiSwitchPromptly (snd <$> evEv)
 
 
 loadedUI :: forall model m t. (HasModel model t, GonimoM model t m)
-      => Model t -> Loaded t -> Bool -> m (App t, Family.UI t)
+      => Model t -> Loaded t -> Bool -> m (ModelConfig t, Family.UI t)
 loadedUI model loaded familyCreated = mdo
     deviceList <- DeviceList.deviceList $ DeviceList.Config { DeviceList._configResponse = model^.onResponse
                                                             , DeviceList._configAuthData = model^.Auth.authData
                                                             , DeviceList._configFamilyId = loaded^.selectedFamily
                                                             }
-    initialRole <- getInitialRole
-    dynPair <- widgetHold
-              (renderCenter deviceList familyCreated initialRole)
-              (renderCenter deviceList False <$> roleSelected)
+    autoStartConf <- handleAutoStart
 
-    let screen = screenSwitchPromptlyDyn . fmap fst $ dynPair
-    let familyUI = Family.uiSwitchPromptlyDyn . fmap snd $ dynPair
+    -- We use double routes for being able to ask the user for confirmation before leave, thus
+    -- we need to filter out multiple identical routes:
+    uniqRoute <- holdUniqDyn $ model ^. Router.route
 
-    let roleSelected = leftmost [ Just <$> familyUI^.Family.uiRoleSelected
-                                , const Nothing <$> screen^.screenGoHome
-                                ]
+    -- Ugly hack, but I don't care for now as this code will get replaced soon anyway.
+    familyCreatedBeh <- hold familyCreated $ False <$ updated uniqRoute
 
-    let app = App { _request = deviceList^.DeviceList.request <> screen^.screenApp.request
-                              <> familyUI^.Family.uiRequest
-                  , _subscriptions = deviceList^.DeviceList.subscriptions <> screen^.screenApp.subscriptions
-                  , _selectLang = never
-                  }
-    pure (app, familyUI)
+    evPair <- networkView $ renderCenter deviceList familyCreatedBeh <$> uniqRoute
+
+    centerConf <- flatten . fmap fst $ evPair
+    familyUI <- Family.uiSwitchPromptly . fmap snd $ evPair
+
+    let baseConf = mempty & Server.onRequest .~ (  (deviceList ^. DeviceList.request)
+                                                <> (familyUI ^. Family.uiRequest)
+                                                )
+                          & Subscriber.subscriptions .~ deviceList ^. DeviceList.subscriptions
+                          & Router.onSetRoute .~ familyUI ^. Family.uiRouteSelected
+
+    let fullConf = baseConf <> centerConf <> autoStartConf
+
+    pure (fullConf, familyUI)
   where
-    renderCenter :: DeviceList.DeviceList t -> Bool -> Maybe Family.GonimoRole -> m (Screen t, Family.UI t)
-    renderCenter deviceList familyCreated' mRole =
-      case mRole of
-          Nothing -> do
+    renderCenter :: DeviceList.DeviceList t -> Behavior t Bool -> Route -> m (ModelConfig t, Family.UI t)
+    renderCenter deviceList familyCreated' route =
+      case route of
+          RouteHome -> do
             Auth.connectionLossScreen model
             (def,) <$> Family.ui model loaded familyCreated'
-          Just Family.RoleBaby -> do
+          RouteBaby -> do
             Auth.connectionLossScreen model
             (, def) <$> Baby.ui model loaded deviceList
           -- Parent renders connection loss screen itself. (Should not be rendered when there is an alarm.)
-          Just Family.RoleParent -> (,def) <$> Parent.ui model loaded deviceList
+          RouteParent -> (, def) <$> Parent.ui loaded deviceList
 
-    getInitialRole = do
+    -- An event that triggers once, if autostart is enabled.
+    -- handleAutoStart :: forall mConf. (IsConfig mConf, Router.HasConfig mConf) => m (mConf t)
+    handleAutoStart = do
       isAutoStart <- Baby.readAutoStart
-      pure $ if isAutoStart
-             then Just Family.RoleBaby
-             else Nothing
+      if isAutoStart
+      then do
+        (ev, trigger) <- newTriggerEvent
+        liftIO $ trigger RouteBaby
+        pure $ mempty & Router.onSetRoute .~ ev
+      else
+        pure mempty
 
 
 checkBrowser ::  forall model m t. GonimoM model t m => m ()

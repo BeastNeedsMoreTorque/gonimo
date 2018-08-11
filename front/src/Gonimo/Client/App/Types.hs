@@ -1,27 +1,33 @@
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE RecordWildCards   #-}
 module Gonimo.Client.App.Types where
 
 import           Control.Lens
 import           Control.Monad
-import           Data.Map                     (Map)
-import qualified Data.Set                     as Set
+import           Data.Map                      (Map)
+import qualified Data.Set                      as Set
 
-import           Gonimo.Client.Account.Impl        (Account, HasAccount)
-import qualified Gonimo.Client.Account.Impl        as Account
-import           Gonimo.Client.Auth.Impl           (Auth, HasAuth)
-import qualified Gonimo.Client.Auth.Impl           as Auth
-import           Gonimo.Client.Environment    (Environment, HasEnvironment(..))
+import           Gonimo.Client.Account         (Account, HasAccount)
+import qualified Gonimo.Client.Account         as Account
+import           Gonimo.Client.Auth            (Auth, HasAuth)
+import qualified Gonimo.Client.Auth            as Auth
+import           Gonimo.Client.Environment     (Environment,
+                                                HasEnvironment (..))
+import           Gonimo.Client.Host            (HasHost (..), Host)
+import qualified Gonimo.Client.Host            as Host
 import           Gonimo.Client.Prelude
-import           Gonimo.Client.Server         (HasServer, Server)
-import qualified Gonimo.Client.Server         as Server
-import           Gonimo.Client.Settings       (HasSettings, Settings)
-import qualified Gonimo.Client.Settings       as Settings
-import           Gonimo.Client.Subscriber.Impl     (SubscriptionsDyn)
-import qualified Gonimo.Client.Subscriber as Subscriber
+import           Gonimo.Client.Router          (HasRouter, Router)
+import qualified Gonimo.Client.Router          as Router
+import           Gonimo.Client.Server          (HasServer, Server)
+import qualified Gonimo.Client.Server          as Server
+import           Gonimo.Client.Settings        (HasSettings, Settings)
+import qualified Gonimo.Client.Settings        as Settings
+import qualified Gonimo.Client.Subscriber      as Subscriber
+import           Gonimo.Client.Subscriber.Impl (SubscriptionsDyn)
 import           Gonimo.I18N
-import qualified Gonimo.SocketAPI             as API
-import qualified Gonimo.SocketAPI.Types       as API
-import qualified Gonimo.Types                 as Gonimo
+import qualified Gonimo.SocketAPI              as API
+import qualified Gonimo.SocketAPI.Types        as API
+import qualified Gonimo.Types                  as Gonimo
 
 
 
@@ -30,6 +36,8 @@ data ModelConfig t
                 , _subscriberConfig :: Subscriber.Config t
                 , _serverConfig     :: Server.Config t
                 , _settingsConfig   :: Settings.Config t
+                , _routerConfig     :: Router.Config t
+                , _hostConfig       :: Host.Config t
                 } deriving (Generic)
 
 data Model t
@@ -37,7 +45,9 @@ data Model t
           , __account     :: Account t
           , __auth        :: Auth t
           , __settings    :: Settings t
-          , __environment :: Environment
+          , __environment :: Environment t
+          , __router      :: Router t
+          , __host        :: Host t
           }
 
 -- | TODO: Get rid of this.
@@ -68,7 +78,21 @@ data Screen t
            , _screenGoHome :: Event t ()
            }
 
-type HasModel model t = (HasServer model, HasAccount model, HasAuth model, HasEnvironment (model t), HasSettings model)
+
+-- Legacy App t to ModelConfig converter.
+appToModelConfig :: Reflex t => App t -> ModelConfig t
+appToModelConfig app' =
+  mempty & Subscriber.subscriptions .~ _subscriptions app'
+         & Server.onRequest .~ _request app'
+         & Settings.onSelectLocale .~ _selectLang app'
+
+-- Legacy Screen to ModelConfig converter.
+screenToModelConfig :: Reflex t => Screen t -> ModelConfig t
+screenToModelConfig screen =
+  appToModelConfig (_screenApp screen) & Router.onGoBack .~ _screenGoHome screen
+
+type HasModel model t = (HasServer model, HasAccount model, HasAuth model, HasEnvironment model, HasSettings model, HasRouter model, HasHost model)
+
 instance HasServer Model where
   server = _server
 
@@ -81,8 +105,14 @@ instance HasAuth Model where
 instance HasSettings Model where
   settings = _settings
 
-instance HasEnvironment (Model t) where
+instance HasEnvironment Model where
   environment = _environment
+
+instance HasRouter Model where
+  router = _router
+
+instance HasHost Model where
+  host = _host
 
 instance (Reflex t) => Default (App t) where
   def = App (constDyn Set.empty) never never
@@ -112,6 +142,12 @@ instance Server.HasConfig ModelConfig where
 instance Settings.HasConfig ModelConfig where
   config = settingsConfig
 
+instance Router.HasConfig ModelConfig where
+  config = routerConfig
+
+instance Host.HasConfig ModelConfig where
+  config = hostConfig
+
 instance Flattenable ModelConfig where
   flattenWith doSwitch ev
     = ModelConfig
@@ -119,6 +155,8 @@ instance Flattenable ModelConfig where
       <*> flattenWith doSwitch (_subscriberConfig <$> ev)
       <*> flattenWith doSwitch (_serverConfig <$> ev)
       <*> flattenWith doSwitch (_settingsConfig <$> ev)
+      <*> flattenWith doSwitch (_routerConfig <$> ev)
+      <*> flattenWith doSwitch (_hostConfig <$> ev)
 
 appSwitchPromptlyDyn :: forall t. Reflex t => Dynamic t (App t) -> App t
 appSwitchPromptlyDyn ev
@@ -132,6 +170,20 @@ screenSwitchPromptlyDyn ev
   = Screen { _screenApp = appSwitchPromptlyDyn (_screenApp <$> ev)
            , _screenGoHome = switchPromptlyDyn $ _screenGoHome <$> ev
            }
+
+instance Flattenable App where
+  flattenWith doSwitch ev = do
+    updatedSubscriptions <- doSwitch never (updated . _subscriptions <$> ev)
+    _subscriptions <- holdDyn Set.empty updatedSubscriptions
+    _request <- doSwitch never (_request <$> ev)
+    _selectLang <- doSwitch never (_selectLang <$> ev)
+    pure $ App{..}
+
+
+instance Flattenable Screen where
+  flattenWith doSwitch ev = do
+    Screen <$> flattenWith doSwitch (_screenApp <$> ev)
+           <*> doSwitch never (_screenGoHome <$> ev)
 
 currentFamilyName :: forall t. Reflex t => Loaded t -> Dynamic t Text
 currentFamilyName loaded =
@@ -166,6 +218,15 @@ serverConfig f modelConfig' = (\serverConfig' -> modelConfig' { _serverConfig = 
 settingsConfig :: Lens' (ModelConfig t) (Settings.Config t)
 settingsConfig f modelConfig' = (\settingsConfig' -> modelConfig' { _settingsConfig = settingsConfig' }) <$> f (_settingsConfig modelConfig')
 
+routerConfig :: Lens' (ModelConfig t) (Router.Config t)
+routerConfig f modelConfig' = (\routerConfig' -> modelConfig' { _routerConfig = routerConfig' }) <$> f (_routerConfig modelConfig')
+
+hostConfig :: Lens' (ModelConfig t) (Host.Config t)
+hostConfig f modelConfig' = (\hostConfig' -> modelConfig' { _hostConfig = hostConfig' }) <$> f (_hostConfig modelConfig')
+
+
+
+
 -- Lenses for Model t:
 
 _server :: Lens' (Model t) (Server t)
@@ -180,8 +241,15 @@ _auth f model' = (\_auth' -> model' { __auth = _auth' }) <$> f (__auth model')
 _settings :: Lens' (Model t) (Settings t)
 _settings f model' = (\_settings' -> model' { __settings = _settings' }) <$> f (__settings model')
 
-_environment :: Lens' (Model t) Environment
+_environment :: Lens' (Model t) (Environment t)
 _environment f model' = (\_environment' -> model' { __environment = _environment' }) <$> f (__environment model')
+
+_router :: Lens' (Model t) (Router t)
+_router f model' = (\_router' -> model' { __router = _router' }) <$> f (__router model')
+
+_host :: Lens' (Model t) (Host t)
+_host f model' = (\_host' -> model' { __host = _host' }) <$> f (__host model')
+
 
 
 -- Lenses for Loaded t:
@@ -215,3 +283,5 @@ screenApp f screen' = (\screenApp' -> screen' { _screenApp = screenApp' }) <$> f
 
 screenGoHome :: Lens' (Screen t) (Event t ())
 screenGoHome f screen' = (\screenGoHome' -> screen' { _screenGoHome = screenGoHome' }) <$> f (_screenGoHome screen')
+
+

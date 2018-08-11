@@ -30,7 +30,9 @@ import           GHCJS.DOM.Types                   (MediaStream,
                                                     MediaStreamTrack, MonadJSM,
                                                     RTCIceCandidate (..),
                                                     RTCIceCandidateInit (..))
-import           Language.Javascript.JSaddle       (JSM, liftJSM)
+import           Language.Javascript.JSaddle       (JSM)
+import           GHCJS.DOM.Enums                   (RTCSignalingState(..))
+
 
 import           Gonimo.Client.Environment         (HasEnvironment)
 import           Gonimo.Client.Reflex              (buildDynMap)
@@ -57,7 +59,7 @@ type ChannelMap t = Map (API.FromId, Secret) (Channel.Channel t)
 type StreamMap = Map (API.FromId, Secret) MediaStream
 type ChannelsBehavior t = Behavior t (ChannelMap t)
 
-data ChannelSelector = AllChannels | OnlyChannel (DeviceId, Secret)
+data ChannelSelector = AllChannels | OnlyChannel (DeviceId, Secret) deriving Show
 
 -- Channels encapsulate RTCPeerConnections and combine them with a signalling channel.
 data Config t
@@ -74,9 +76,9 @@ data Channels t
              , _remoteStreams :: Dynamic t StreamMap -- Useful to have this separate for rendering. (Don't reload videos on every change to map.)
              }
 
-type HasModel model t = HasEnvironment (model t)
+type HasModel model = HasEnvironment model
 
-channels :: forall model m t. (HasModel model t, GonimoM model t m) => Config t -> m (Channels t)
+channels :: forall model m t. (HasModel model, GonimoM model t m) => Config t -> m (Channels t)
 channels config = mdo
   model <- ask
   (channelEvent, triggerChannelEvent) <- newTriggerEvent
@@ -253,7 +255,7 @@ handleBroadcastStream config channels' = do
     performEvent_ $ pushAlways replaceStreams (updated $ config^.configBroadcastStream)
 
 handleCreateChannel :: ( MonadHold t m, MonadFix m, Reflex t, PerformEvent t m
-                       , MonadJSM (Performable m), HasModel model t
+                       , MonadJSM (Performable m), HasModel model
                        )
                     => model t -> Config t -> (ChannelEvent -> IO ()) -> m (Event t (ChannelMap t -> ChannelMap t))
 handleCreateChannel model config triggerChannelEvent
@@ -403,6 +405,8 @@ handleRTCEvents ourId chans chanEv = do
                          msg <- handleRejectedWithClose conn
                            $ case rtcEv of
                                 RTCEventNegotiationNeeded -> do
+                                  sigState <- getSignalingState conn
+                                  guard $ sigState == RTCSignalingStateStable -- Recent Chromes trigger Negotiation needed twice, causing setRemoteDescription to fail with: wrong state: stable.
                                   jsOffer <- createOffer conn Nothing
                                   setLocalDescription conn jsOffer
                                   offer <- API.mFromFrontend jsOffer
